@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>별똥별 피하기</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #070b1a; overflow: hidden; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color: #fff;
+    touch-action: none; user-select: none;
+  }
+  #wrap { position: relative; width: min(100vw, 480px); height: min(100vh, 800px); }
+  canvas { display: block; width: 100%; height: 100%; border-radius: 12px; background: #0b1230; }
+  #hud {
+    position: absolute; top: 12px; left: 16px; right: 16px;
+    display: flex; justify-content: space-between; font-weight: bold; font-size: 18px;
+    pointer-events: none; text-shadow: 0 2px 4px #000;
+  }
+  #overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; text-align: center;
+    background: rgba(5, 8, 25, 0.72); border-radius: 12px; padding: 24px;
+  }
+  #overlay.hidden { display: none; }
+  h1 { font-size: 40px; color: #ffd84d; text-shadow: 0 0 18px #ff9d2e; }
+  p { font-size: 16px; line-height: 1.6; color: #c8d2ff; }
+  button {
+    margin-top: 8px; padding: 12px 36px; font-size: 20px; font-weight: bold;
+    border: none; border-radius: 999px; cursor: pointer; color: #1a1030;
+    background: linear-gradient(135deg, #ffd84d, #ff8a3d); box-shadow: 0 4px 16px #ff8a3d66;
+  }
+  button:active { transform: scale(0.96); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div id="hud"><span id="score">점수 0</span><span id="lives">❤️❤️❤️</span></div>
+  <div id="overlay">
+    <h1 id="title">별똥별 피하기</h1>
+    <p id="msg">
+      떨어지는 운석 ☄️ 을 피하고<br>노란 별 ⭐ 을 모으세요!<br><br>
+      ← → / A D 키, 또는 마우스·터치로 이동<br>P 키: 일시정지
+    </p>
+    <button id="start">시작하기</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const scoreEl = document.getElementById("score");
+const livesEl = document.getElementById("lives");
+const overlay = document.getElementById("overlay");
+const titleEl = document.getElementById("title");
+const msgEl = document.getElementById("msg");
+const startBtn = document.getElementById("start");
+
+let W, H;
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = r.width * dpr;
+  canvas.height = r.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  W = r.width; H = r.height;
+}
+window.addEventListener("resize", resize);
+resize();
+
+function loadBest() { try { return +localStorage.getItem("meteorBest") || 0; } catch { return 0; } }
+function saveBest(v) { try { localStorage.setItem("meteorBest", v); } catch {} }
+
+// 배경 별
+const bgStars = Array.from({ length: 80 }, () => ({
+  x: Math.random(), y: Math.random(), s: Math.random() * 1.6 + 0.3, v: Math.random() * 0.4 + 0.1
+}));
+
+let state = "menu"; // menu | play | pause | over
+let player, meteors, stars, particles, score, lives, time, spawnT, starT, invuln, shake;
+const keys = {};
+let pointerX = null;
+
+function reset() {
+  player = { x: W / 2, y: H - 70, r: 16, speed: 360 };
+  meteors = []; stars = []; particles = [];
+  score = 0; lives = 3; time = 0; spawnT = 0; starT = 1.5; invuln = 0; shake = 0;
+  updateHud();
+}
+
+function updateHud() {
+  scoreEl.textContent = "점수 " + score;
+  livesEl.textContent = "❤️".repeat(lives) + "🖤".repeat(3 - lives);
+}
+
+function burst(x, y, color, n, spd) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, v = Math.random() * spd;
+    particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.6 + Math.random() * 0.4, color });
+  }
+}
+
+function spawnMeteor() {
+  const level = 1 + time / 20;
+  const r = 10 + Math.random() * 18;
+  meteors.push({
+    x: r + Math.random() * (W - r * 2), y: -r, r,
+    vx: (Math.random() - 0.5) * 60 * level,
+    vy: (120 + Math.random() * 120) * Math.min(level, 3.5),
+    rot: 0, vr: (Math.random() - 0.5) * 4
+  });
+}
+
+function update(dt) {
+  time += dt;
+  // 이동
+  let dir = 0;
+  if (keys.ArrowLeft || keys.a || keys.A) dir -= 1;
+  if (keys.ArrowRight || keys.d || keys.D) dir += 1;
+  if (dir) { player.x += dir * player.speed * dt; pointerX = null; }
+  else if (pointerX !== null) player.x += (pointerX - player.x) * Math.min(1, dt * 12);
+  player.x = Math.max(player.r, Math.min(W - player.r, player.x));
+  player.y = H - 70;
+
+  // 생성
+  spawnT -= dt;
+  if (spawnT <= 0) { spawnMeteor(); spawnT = Math.max(0.18, 0.9 - time * 0.012); }
+  starT -= dt;
+  if (starT <= 0) {
+    stars.push({ x: 20 + Math.random() * (W - 40), y: -15, r: 11, vy: 140, t: 0 });
+    starT = 1.2 + Math.random() * 1.5;
+  }
+
+  // 운석
+  for (const m of meteors) {
+    m.x += m.vx * dt; m.y += m.vy * dt; m.rot += m.vr * dt;
+    if (m.x < m.r || m.x > W - m.r) m.vx *= -1;
+    if (invuln <= 0 && Math.hypot(m.x - player.x, m.y - player.y) < m.r + player.r * 0.8) {
+      m.dead = true; lives--; invuln = 1.5; shake = 0.3;
+      burst(player.x, player.y, "#ff6b4a", 30, 260);
+      updateHud();
+      if (lives <= 0) return gameOver();
+    }
+    if (m.y > H + m.r) { m.dead = true; score += 1; updateHud(); }
+  }
+  meteors = meteors.filter(m => !m.dead);
+
+  // 별
+  for (const s of stars) {
+    s.y += s.vy * dt; s.t += dt;
+    if (Math.hypot(s.x - player.x, s.y - player.y) < s.r + player.r) {
+      s.dead = true; score += 10; updateHud();
+      burst(s.x, s.y, "#ffd84d", 18, 180);
+    }
+    if (s.y > H + 20) s.dead = true;
+  }
+  stars = stars.filter(s => !s.dead);
+
+  // 파티클
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+  particles = particles.filter(p => p.life > 0);
+
+  // 엔진 불꽃
+  if (Math.random() < 0.8) particles.push({
+    x: player.x + (Math.random() - 0.5) * 8, y: player.y + 18,
+    vx: (Math.random() - 0.5) * 30, vy: 80 + Math.random() * 60, life: 0.3, color: "#6fd3ff"
+  });
+
+  invuln -= dt; shake -= dt;
+}
+
+function drawStarShape(x, y, r, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rr = i % 2 ? r * 0.45 : r;
+    const a = rot + (i * Math.PI) / 5 - Math.PI / 2;
+    ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+  }
+  ctx.closePath();
+}
+
+function draw() {
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * 10, (Math.random() - 0.5) * 10);
+
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#0b1230"); g.addColorStop(1, "#1c1446");
+  ctx.fillStyle = g; ctx.fillRect(-10, -10, W + 20, H + 20);
+
+  for (const s of bgStars) {
+    if (state === "play") s.y = (s.y + s.v * 0.004) % 1;
+    ctx.fillStyle = `rgba(255,255,255,${0.3 + s.s * 0.3})`;
+    ctx.fillRect(s.x * W, s.y * H, s.s, s.s);
+  }
+
+  // 파티클
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+
+  // 별
+  for (const s of stars) {
+    ctx.shadowColor = "#ffd84d"; ctx.shadowBlur = 16;
+    ctx.fillStyle = "#ffd84d";
+    drawStarShape(s.x, s.y, s.r + Math.sin(s.t * 6) * 1.5, s.t * 2);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+
+  // 운석
+  for (const m of meteors) {
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    // 꼬리
+    const tail = ctx.createLinearGradient(0, 0, -m.vx * 0.15, -m.vy * 0.15);
+    tail.addColorStop(0, "rgba(255,120,60,0.6)"); tail.addColorStop(1, "rgba(255,120,60,0)");
+    ctx.strokeStyle = tail; ctx.lineWidth = m.r * 1.4; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-m.vx * 0.15, -m.vy * 0.15); ctx.stroke();
+    ctx.rotate(m.rot);
+    ctx.fillStyle = "#8a5a44";
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2, rr = m.r * (0.8 + ((i * 37) % 5) / 20);
+      ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#5e3a2c";
+    ctx.beginPath(); ctx.arc(m.r * 0.25, -m.r * 0.2, m.r * 0.25, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // 플레이어 (우주선)
+  if (state !== "over" && !(invuln > 0 && Math.floor(invuln * 10) % 2)) {
+    const { x, y } = player;
+    ctx.fillStyle = "#e8f0ff";
+    ctx.beginPath();
+    ctx.moveTo(x, y - 22); ctx.lineTo(x + 16, y + 16); ctx.lineTo(x, y + 9); ctx.lineTo(x - 16, y + 16);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#4ab8ff";
+    ctx.beginPath(); ctx.arc(x, y - 4, 5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  if (state === "play") update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function startGame() {
+  reset();
+  state = "play";
+  overlay.classList.add("hidden");
+}
+
+function gameOver() {
+  state = "over";
+  const best = Math.max(score, loadBest());
+  saveBest(best);
+  titleEl.textContent = "게임 오버";
+  msgEl.innerHTML = `점수: <b>${score}</b><br>최고 기록: <b>${best}</b><br>버틴 시간: ${time.toFixed(1)}초`;
+  startBtn.textContent = "다시 하기";
+  overlay.classList.remove("hidden");
+}
+
+function togglePause() {
+  if (state === "play") {
+    state = "pause";
+    titleEl.textContent = "일시정지";
+    msgEl.textContent = "P 키나 버튼을 눌러 계속하세요";
+    startBtn.textContent = "계속하기";
+    overlay.classList.remove("hidden");
+  } else if (state === "pause") {
+    state = "play";
+    overlay.classList.add("hidden");
+  }
+}
+
+startBtn.addEventListener("click", () => (state === "pause" ? togglePause() : startGame()));
+
+window.addEventListener("keydown", e => {
+  keys[e.key] = true;
+  if (e.key === "p" || e.key === "P") togglePause();
+  if ((e.key === " " || e.key === "Enter") && (state === "menu" || state === "over")) startGame();
+  if (e.key.startsWith("Arrow") || e.key === " ") e.preventDefault();
+});
+window.addEventListener("keyup", e => { keys[e.key] = false; });
+
+function setPointer(e) {
+  const r = canvas.getBoundingClientRect();
+  pointerX = e.clientX - r.left;
+}
+canvas.addEventListener("pointermove", setPointer);
+canvas.addEventListener("pointerdown", setPointer);
+
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
